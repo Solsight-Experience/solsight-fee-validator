@@ -1,6 +1,6 @@
 use crate::{
     error::KoraError,
-    oracle::{jupiter::JupiterPriceOracle, utils::OracleUtil},
+    oracle::{jupiter::JupiterPriceOracle, redis::RedisPriceOracle, utils::OracleUtil},
 };
 use mockall::automock;
 use reqwest::Client;
@@ -25,6 +25,7 @@ pub struct TokenPrice {
 pub enum PriceSource {
     Jupiter,
     Mock,
+    Redis,
 }
 
 #[automock]
@@ -53,6 +54,7 @@ pub fn get_price_oracle(
     match source {
         PriceSource::Jupiter => Ok(Arc::new(JupiterPriceOracle::new()?)),
         PriceSource::Mock => Ok(OracleUtil::get_mock_oracle_price()),
+        PriceSource::Redis => Ok(Arc::new(RedisPriceOracle::new()?)),
     }
 }
 
