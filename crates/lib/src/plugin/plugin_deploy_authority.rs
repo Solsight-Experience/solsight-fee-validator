@@ -8,7 +8,7 @@ use crate::{
     error::KoraError,
     transaction::{
         ParsedBpfLoaderUpgradeableInstructionData, ParsedLoaderV4InstructionData,
-        VersionedTransactionResolved,
+        ParsedSystemInstructionData, ParsedSystemInstructionType, VersionedTransactionResolved,
     },
 };
 
@@ -17,7 +17,8 @@ use super::{PluginExecutionContext, TransactionPlugin};
 /// Enforces that the fee payer is the authority on every program-loader instruction we sign,
 /// covering both BPF Loader Upgradeable (loader-v3) and Loader-v4. The core fee-payer policies
 /// gate whether Kora is *willing* to participate as authority; this plugin requires Kora to
-/// *be* the authority and rejects any tx that would hand control elsewhere.
+/// *be* the authority and rejects any tx that would hand control elsewhere. It also confines
+/// fee-payer-funded CreateAccount to loader-owned accounts.
 ///
 /// The plugin is inert for whichever loader has all `allow_*` flags off — operators flip the
 /// flags for the loader(s) they want to subsidize.
@@ -112,12 +113,21 @@ impl TransactionPlugin for DeployAuthorityPlugin {
                     }
                 }
                 ParsedBpfLoaderUpgradeableInstructionData::Upgrade {
-                    upgrade_authority, ..
+                    upgrade_authority,
+                    spill,
+                    ..
                 } => {
                     if upgrade_authority != fee_payer {
                         return Err(KoraError::InvalidTransaction(format!(
                             "DeployAuthority plugin: Upgrade upgrade_authority must be the \
                              fee payer ({fee_payer}), got {upgrade_authority} in {}",
+                            context.method_name()
+                        )));
+                    }
+                    if spill != fee_payer {
+                        return Err(KoraError::InvalidTransaction(format!(
+                            "DeployAuthority plugin: Upgrade spill must be the fee payer \
+                             ({fee_payer}), got {spill} in {}",
                             context.method_name()
                         )));
                     }
@@ -206,6 +216,79 @@ impl TransactionPlugin for DeployAuthorityPlugin {
             }
         }
 
+        // A fee-payer-funded account must be loader-owned and consumed in the same tx (initialized
+        // or operated on by its loader) — otherwise its rent is siphoned or stranded.
+        let mut v3_consumed: Vec<Pubkey> = Vec::new();
+        for data in bpf_v3.values().flatten() {
+            match data {
+                ParsedBpfLoaderUpgradeableInstructionData::InitializeBuffer { buffer, .. } => {
+                    v3_consumed.push(*buffer)
+                }
+                ParsedBpfLoaderUpgradeableInstructionData::DeployWithMaxDataLen {
+                    program,
+                    program_data,
+                    ..
+                } => {
+                    v3_consumed.push(*program);
+                    v3_consumed.push(*program_data);
+                }
+                _ => {}
+            }
+        }
+        let mut v4_consumed: Vec<Pubkey> = Vec::new();
+        for data in loader_v4.values().flatten() {
+            match data {
+                ParsedLoaderV4InstructionData::Write { program, .. }
+                | ParsedLoaderV4InstructionData::SetProgramLength { program, .. }
+                | ParsedLoaderV4InstructionData::Deploy { program, .. }
+                | ParsedLoaderV4InstructionData::Retract { program, .. }
+                | ParsedLoaderV4InstructionData::TransferAuthority { program, .. } => {
+                    v4_consumed.push(*program)
+                }
+                ParsedLoaderV4InstructionData::Copy { destination_program, .. } => {
+                    v4_consumed.push(*destination_program)
+                }
+                ParsedLoaderV4InstructionData::Finalize { .. } => {}
+            }
+        }
+        let system = transaction.get_or_parse_system_instructions()?.clone();
+        for data in
+            system.get(&ParsedSystemInstructionType::SystemCreateAccount).into_iter().flatten()
+        {
+            if let ParsedSystemInstructionData::SystemCreateAccount {
+                payer,
+                owner,
+                new_account,
+                ..
+            } = data
+            {
+                if payer != fee_payer {
+                    continue;
+                }
+                if *owner != BPF_LOADER_UPGRADEABLE_PROGRAM_ID && *owner != LOADER_V4_PROGRAM_ID {
+                    return Err(KoraError::InvalidTransaction(format!(
+                        "DeployAuthority plugin: fee payer ({fee_payer}) may only fund \
+                         loader-owned accounts; CreateAccount for {new_account} assigns owner \
+                         {owner} in {}",
+                        context.method_name()
+                    )));
+                }
+                let consumed = if *owner == LOADER_V4_PROGRAM_ID {
+                    v4_consumed.contains(new_account)
+                } else {
+                    v3_consumed.contains(new_account)
+                };
+                if !consumed {
+                    return Err(KoraError::InvalidTransaction(format!(
+                        "DeployAuthority plugin: fee payer ({fee_payer}) funded CreateAccount for \
+                         {new_account} that is not initialized or operated on by its loader in the \
+                         same transaction in {}",
+                        context.method_name()
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -266,7 +349,7 @@ impl TransactionPlugin for DeployAuthorityPlugin {
 mod tests {
     use super::{super::TransactionPluginRunner, *};
     use crate::{
-        config::TransactionPluginType,
+        config::{ProgramsConfig, TransactionPluginType},
         constant::LOADER_V4_PROGRAM_ID,
         tests::{common::RpcMockBuilder, config_mock::ConfigMockBuilder},
         transaction::TransactionUtil,
@@ -274,7 +357,9 @@ mod tests {
     use solana_loader_v4_interface::instruction as loader_v4;
     use solana_message::{Message, VersionedMessage};
     use solana_sdk::pubkey::Pubkey;
-    use solana_system_interface::instruction::transfer as system_transfer;
+    use solana_system_interface::instruction::{
+        create_account as system_create_account, transfer as system_transfer,
+    };
     use std::sync::Arc;
 
     fn enable_deploy_authority_plugin(config: &mut Config) {
@@ -296,8 +381,17 @@ mod tests {
         fee_payer: &Pubkey,
         ix: solana_sdk::instruction::Instruction,
     ) -> Result<(), KoraError> {
+        run_plugin_ixs(config, rpc_client, fee_payer, &[ix]).await
+    }
+
+    async fn run_plugin_ixs(
+        config: &Config,
+        rpc_client: &Arc<RpcClient>,
+        fee_payer: &Pubkey,
+        ixs: &[solana_sdk::instruction::Instruction],
+    ) -> Result<(), KoraError> {
         let tx = TransactionUtil::new_unsigned_versioned_transaction(VersionedMessage::Legacy(
-            Message::new(&[ix], Some(fee_payer)),
+            Message::new(ixs, Some(fee_payer)),
         ));
         let mut resolved = VersionedTransactionResolved::from_kora_built_transaction(&tx).unwrap();
         let runner = TransactionPluginRunner::from_config(config);
@@ -666,13 +760,154 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn v3_rejects_upgrade_with_foreign_spill() {
+        use solana_loader_v3_interface::instruction as loader_v3;
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let buffer = Pubkey::new_unique();
+        let attacker = Pubkey::new_unique();
+        let ix = loader_v3::upgrade(&program, &buffer, &fee_payer, &attacker);
+        let err = run_plugin(&config, &rpc_client, &fee_payer, ix).await.expect_err("must reject");
+        assert!(
+            matches!(&err, KoraError::InvalidTransaction(msg) if msg.contains("Upgrade spill")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_accepts_upgrade_spill_to_kora() {
+        use solana_loader_v3_interface::instruction as loader_v3;
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let buffer = Pubkey::new_unique();
+        let ix = loader_v3::upgrade(&program, &buffer, &fee_payer, &fee_payer);
+        assert!(run_plugin(&config, &rpc_client, &fee_payer, ix).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_create_account_funding_caller_wallet() {
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let attacker = Pubkey::new_unique();
+        let ix = system_create_account(
+            &fee_payer,
+            &attacker,
+            10_000_000_000,
+            0,
+            &solana_system_interface::program::id(),
+        );
+        let err = run_plugin(&config, &rpc_client, &fee_payer, ix).await.expect_err("must reject");
+        assert!(
+            matches!(&err, KoraError::InvalidTransaction(msg) if msg.contains("loader-owned")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_create_account_paired_with_initialize_buffer() {
+        use solana_loader_v3_interface::instruction as loader_v3;
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let buffer = Pubkey::new_unique();
+        let ixs = loader_v3::create_buffer(&fee_payer, &buffer, &fee_payer, 1_000_000, 0).unwrap();
+        assert!(run_plugin_ixs(&config, &rpc_client, &fee_payer, &ixs).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn accepts_deploy_with_inner_programdata_create() {
+        use solana_loader_v3_interface::instruction as loader_v3;
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let buffer = Pubkey::new_unique();
+        let program_data =
+            Pubkey::find_program_address(&[program.as_ref()], &BPF_LOADER_UPGRADEABLE_PROGRAM_ID).0;
+        let mut ixs = loader_v3::deploy_with_max_program_len(
+            &fee_payer, &program, &buffer, &fee_payer, 1_000_000, 0,
+        )
+        .unwrap();
+        ixs.push(system_create_account(
+            &fee_payer,
+            &program_data,
+            1_000_000,
+            0,
+            &BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
+        ));
+        assert!(run_plugin_ixs(&config, &rpc_client, &fee_payer, &ixs).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_orphan_loader_owned_create_account() {
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let buffer = Pubkey::new_unique();
+        let ix = system_create_account(
+            &fee_payer,
+            &buffer,
+            1_000_000,
+            36,
+            &BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
+        );
+        let err = run_plugin(&config, &rpc_client, &fee_payer, ix).await.expect_err("must reject");
+        assert!(
+            matches!(&err, KoraError::InvalidTransaction(msg)
+                if msg.contains("not initialized or operated on by its loader")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_create_account_paired_with_loader_v4_set_program_length() {
+        let (config, rpc_client) = build_runner();
+        let fee_payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let ixs = vec![
+            system_create_account(&fee_payer, &program, 1_000_000, 36, &LOADER_V4_PROGRAM_ID),
+            loader_v4::set_program_length(&program, &fee_payer, 1024, &fee_payer),
+        ];
+        assert!(run_plugin_ixs(&config, &rpc_client, &fee_payer, &ixs).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_orphan_loader_v4_owned_create_account() {
+        let (config, rpc_client) = build_runner();
+        let fee_payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let ix = system_create_account(&fee_payer, &program, 1_000_000, 36, &LOADER_V4_PROGRAM_ID);
+        let err = run_plugin(&config, &rpc_client, &fee_payer, ix).await.expect_err("must reject");
+        assert!(
+            matches!(&err, KoraError::InvalidTransaction(msg)
+                if msg.contains("not initialized or operated on by its loader")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ignores_create_account_funded_by_someone_else() {
+        let (config, rpc_client) = build_runner_v3();
+        let fee_payer = Pubkey::new_unique();
+        let other_payer = Pubkey::new_unique();
+        let new_account = Pubkey::new_unique();
+        let ix = system_create_account(
+            &other_payer,
+            &new_account,
+            10_000_000_000,
+            0,
+            &solana_system_interface::program::id(),
+        );
+        assert!(run_plugin(&config, &rpc_client, &fee_payer, ix).await.is_ok());
+    }
+
     #[test]
     fn validate_config_errors_when_no_loader_in_allowed_programs() {
         let plugin = DeployAuthorityPlugin;
         let mut config = ConfigMockBuilder::new().build();
         enable_deploy_authority_plugin(&mut config);
         // Ensure neither loader is in allowed_programs.
-        config.validation.allowed_programs.clear();
+        config.validation.allowed_programs = ProgramsConfig::Allowlist(vec![]);
         config.validation.fee_payer_policy.bpf_loader_upgradeable.allow_write = true;
 
         let (errors, _) = plugin.validate_config(&config);

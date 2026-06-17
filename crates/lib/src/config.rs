@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use crate::{
     bundle::JitoConfig,
     constant::{
-        DEFAULT_CACHE_ACCOUNT_TTL, DEFAULT_CACHE_DEFAULT_TTL,
+        DEFAULT_CACHE_ACCOUNT_TTL, DEFAULT_CACHE_DEFAULT_TTL, DEFAULT_CACHE_PRICE_TTL,
         DEFAULT_FEE_PAYER_BALANCE_METRICS_EXPIRY_SECONDS, DEFAULT_MAX_REQUEST_BODY_SIZE,
         DEFAULT_MAX_TIMESTAMP_AGE, DEFAULT_METRICS_ENDPOINT, DEFAULT_METRICS_PORT,
         DEFAULT_METRICS_SCRAPE_INTERVAL, DEFAULT_PROTECTED_METHODS,
@@ -115,13 +115,79 @@ impl SplTokenConfig {
             SplTokenConfig::Allowlist(v) => v.as_slice(),
         }
     }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.into_iter()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ProgramsConfig {
+    All,
+    #[serde(untagged)]
+    Allowlist(Vec<String>),
+}
+
+impl utoipa::PartialSchema for ProgramsConfig {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        string_or_string_array_schema()
+    }
+}
+
+impl utoipa::ToSchema for ProgramsConfig {}
+
+/// OpenAPI schema for enums that serialize as either the literal string `"All"` or a JSON array
+/// of strings. The auto-derived schema treats the untagged `Allowlist` variant as an object
+/// wrapper, which does not match the actual JSON form.
+fn string_or_string_array_schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    use utoipa::openapi::{schema::Type, ArrayBuilder, ObjectBuilder, OneOfBuilder};
+    OneOfBuilder::new()
+        .item(ObjectBuilder::new().schema_type(Type::String).enum_values(Some(vec!["All"])).build())
+        .item(
+            ArrayBuilder::new()
+                .items(ObjectBuilder::new().schema_type(Type::String).build())
+                .build(),
+        )
+        .into()
+}
+
+impl<'a> IntoIterator for &'a ProgramsConfig {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            ProgramsConfig::All => [].iter(),
+            ProgramsConfig::Allowlist(programs) => programs.iter(),
+        }
+    }
+}
+
+impl ProgramsConfig {
+    pub fn is_all(&self) -> bool {
+        matches!(self, ProgramsConfig::All)
+    }
+
+    pub fn contains(&self, program: &str) -> bool {
+        match self {
+            ProgramsConfig::All => true,
+            ProgramsConfig::Allowlist(programs) => programs.iter().any(|p| p == program),
+        }
+    }
+
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            ProgramsConfig::All => &[],
+            ProgramsConfig::Allowlist(v) => v.as_slice(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ValidationConfig {
     pub max_allowed_lamports: u64,
     pub max_signatures: u64,
-    pub allowed_programs: Vec<String>,
+    pub allowed_programs: ProgramsConfig,
     pub allowed_tokens: Vec<String>,
     pub allowed_spl_paid_tokens: SplTokenConfig,
     pub disallowed_accounts: Vec<String>,
@@ -146,6 +212,22 @@ pub struct ValidationConfig {
     /// Default: empty (no restriction).
     #[serde(default)]
     pub require_one_of_programs: Vec<String>,
+    /// When true, checks configured mint addresses against other known clusters
+    /// and warns if a mint is found on a different cluster than the one connected.
+    /// Disabled by default: the check contacts public RPC endpoints, which may be undesirable
+    /// for operators who want to keep their mint addresses private.
+    #[serde(default)]
+    pub cross_cluster_check: bool,
+    #[serde(default = "default_cross_cluster_endpoints")]
+    pub cross_cluster_endpoints: Vec<String>,
+}
+
+fn default_cross_cluster_endpoints() -> Vec<String> {
+    vec![
+        "https://api.mainnet-beta.solana.com".to_string(),
+        "https://api.devnet.solana.com".to_string(),
+        "https://api.testnet.solana.com".to_string(),
+    ]
 }
 
 impl ValidationConfig {
@@ -564,6 +646,9 @@ pub struct CacheConfig {
     pub default_ttl: u64,
     /// TTL for account data cache in seconds
     pub account_ttl: u64,
+    /// TTL for token price data cache in seconds
+    #[serde(default)]
+    pub price_ttl: u64,
 }
 
 impl Default for CacheConfig {
@@ -573,6 +658,7 @@ impl Default for CacheConfig {
             enabled: false,
             default_ttl: DEFAULT_CACHE_DEFAULT_TTL,
             account_ttl: DEFAULT_CACHE_ACCOUNT_TTL,
+            price_ttl: DEFAULT_CACHE_PRICE_TTL,
         }
     }
 }
@@ -696,6 +782,17 @@ impl Default for AuthConfig {
     }
 }
 
+impl AuthConfig {
+    pub(crate) fn normalize_optional_secret(value: Option<String>) -> Option<String> {
+        value.filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn has_auth(&self) -> bool {
+        self.api_key.as_deref().is_some_and(|key| !key.is_empty())
+            || self.hmac_secret.as_deref().is_some_and(|key| !key.is_empty())
+    }
+}
+
 impl Config {
     pub fn load_config<P: AsRef<Path>>(path: P) -> Result<Config, KoraError> {
         let contents = fs::read_to_string(path).map_err(|e| {
@@ -759,7 +856,10 @@ mod tests {
 
         assert_eq!(config.validation.max_allowed_lamports, 1000000000);
         assert_eq!(config.validation.max_signatures, 10);
-        assert_eq!(config.validation.allowed_programs, vec!["program1", "program2"]);
+        assert_eq!(
+            config.validation.allowed_programs,
+            ProgramsConfig::Allowlist(vec!["program1".to_string(), "program2".to_string()])
+        );
         assert_eq!(config.validation.allowed_tokens, vec!["token1", "token2"]);
         assert_eq!(
             config.validation.allowed_spl_paid_tokens,
@@ -823,6 +923,41 @@ mod tests {
             ConfigBuilder::new().with_spl_paid_tokens(SplTokenConfig::All).build_config().unwrap();
 
         assert_eq!(config.validation.allowed_spl_paid_tokens, SplTokenConfig::All);
+    }
+
+    #[test]
+    fn test_parse_allowed_programs_all_from_toml() {
+        let toml_content = r#"
+                            [validation]
+                            max_allowed_lamports = 1
+                            max_signatures = 1
+                            allowed_programs = "All"
+                            allowed_tokens = []
+                            allowed_spl_paid_tokens = []
+                            disallowed_accounts = []
+                            price_source = "Mock"
+
+                            [kora]
+                            rate_limit = 1
+                            "#;
+        let config = crate::tests::toml_mock::create_invalid_config(toml_content)
+            .expect("TOML with allowed_programs = \"All\" should parse");
+        assert_eq!(config.validation.allowed_programs, ProgramsConfig::All);
+    }
+
+    #[test]
+    fn test_allowed_programs_json_serialization() {
+        // ProgramsConfig::All must serialize as the string "All" — the user-facing
+        // getConfig contract depends on this wire format.
+        let all_json = serde_json::to_string(&ProgramsConfig::All).unwrap();
+        assert_eq!(all_json, "\"All\"");
+
+        let allowlist_json = serde_json::to_string(&ProgramsConfig::Allowlist(vec![
+            "program1".to_string(),
+            "program2".to_string(),
+        ]))
+        .unwrap();
+        assert_eq!(allowlist_json, "[\"program1\",\"program2\"]");
     }
 
     #[test]
@@ -1081,6 +1216,7 @@ allow_create = true
         assert!(!config.kora.cache.enabled);
         assert_eq!(config.kora.cache.default_ttl, 300);
         assert_eq!(config.kora.cache.account_ttl, 60);
+        assert_eq!(config.kora.cache.price_ttl, 0);
     }
 
     #[test]
