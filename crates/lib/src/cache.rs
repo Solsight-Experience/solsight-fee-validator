@@ -15,7 +15,7 @@ use crate::{
 };
 
 #[cfg(not(test))]
-use crate::oracle::get_price_oracle;
+use crate::oracle::get_price_oracle_with_redis_url;
 #[cfg(not(test))]
 use crate::state::get_config;
 
@@ -391,6 +391,12 @@ impl CacheUtil {
         let (initialized, oracle) = PRICE_ORACLE
             .get_or_try_init(|| async {
                 let source = config.validation.price_source.clone();
+                #[cfg(not(test))]
+                let inner = get_price_oracle_with_redis_url(
+                    source.clone(),
+                    config.kora.cache.resolved_url(),
+                )?;
+                #[cfg(test)]
                 let inner = get_price_oracle(source.clone())?;
                 Ok::<_, KoraError>((
                     source,

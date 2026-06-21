@@ -33,6 +33,7 @@ impl PriceSource {
         match self {
             PriceSource::Jupiter => "jupiter",
             PriceSource::Mock => "mock",
+            PriceSource::Redis => "redis",
         }
     }
 }
@@ -63,10 +64,17 @@ const ORACLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn get_price_oracle(
     source: PriceSource,
 ) -> Result<Arc<dyn PriceOracle + Send + Sync>, KoraError> {
+    get_price_oracle_with_redis_url(source, None)
+}
+
+pub fn get_price_oracle_with_redis_url(
+    source: PriceSource,
+    redis_url: Option<String>,
+) -> Result<Arc<dyn PriceOracle + Send + Sync>, KoraError> {
     match source {
         PriceSource::Jupiter => Ok(Arc::new(JupiterPriceOracle::new()?)),
         PriceSource::Mock => Ok(OracleUtil::get_mock_oracle_price()),
-        PriceSource::Redis => Ok(Arc::new(RedisPriceOracle::new()?)),
+        PriceSource::Redis => Ok(Arc::new(RedisPriceOracle::new_with_config_url(redis_url)?)),
     }
 }
 

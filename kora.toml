@@ -52,7 +52,7 @@ get_version = true
 [validation]
 max_allowed_lamports = 1000000
 max_signatures = 10
-price_source = "Mock"
+price_source = "Redis"
 allow_durable_transactions = false
 cross_cluster_check = false
 cross_cluster_endpoints = [
@@ -62,17 +62,29 @@ cross_cluster_endpoints = [
 ]
 
 allowed_programs = [
+    "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "So1kg8essRGXgZZz8PFk7fZsSsoVzYHcpShKzfCBstS",
     "11111111111111111111111111111111",              # System Program
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # Token Program
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # Associated Token Program
     "AddressLookupTab1e1111111111111111111111111",   # Address Lookup Table Program
     "ComputeBudget111111111111111111111111111111",   # Compute Budget Program
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+    "DRaya7Kj3aMWQSy19kSjvmuwq9docCHofyP9kanQGaav",
+    "DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH"
     # "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", # Lighthouse Program (uncomment when lighthouse enabled)
 ]
 allowed_tokens = [
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+    "BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k", # USDC
+    "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT"
 ]
-allowed_spl_paid_tokens = []
+allowed_spl_paid_tokens = [
+    "BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k",
+    "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT"
+]
 #allowed_spl_paid_tokens = "All"  # Allow any token to be used for payment,
 disallowed_accounts = []
 # require_one_of_programs = []  # At least one of these programs must be called. Each must also appear in allowed_programs.
@@ -162,7 +174,7 @@ blocked_account_extensions = [
 [metrics]
 enabled = true
 endpoint = "/metrics"
-port = 8080  # Same port as main server, or separate port like 9090
+port = 8081  # Same port as main server, or separate port like 9090
 scrape_interval = 60
 
 [metrics.fee_payer_balance]

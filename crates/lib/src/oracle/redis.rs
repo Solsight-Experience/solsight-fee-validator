@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 const REDIS_DEFAULT_CONFIDENCE: f64 = 0.8;
-const DEFAULT_KEY_PREFIX: &str = "price";
+const DEFAULT_KEY_PREFIX: &str = "price:devnet";
 
 pub struct RedisPriceOracle {
     client: redis::Client,
@@ -15,32 +15,48 @@ pub struct RedisPriceOracle {
 
 impl RedisPriceOracle {
     pub fn new() -> Result<Self, KoraError> {
-        let url = std::env::var("REDIS_URL").map_err(|_| {
-            log::error!("Redis URL not found. Set REDIS_URL environment variable.");
-            KoraError::ConfigError(
-                "Redis URL not found. Set REDIS_URL environment variable".to_string(),
-            )
-        })?;
+        Self::new_with_config_url(None)
+    }
 
+    pub fn new_with_config_url(config_url: Option<String>) -> Result<Self, KoraError> {
+        let url = config_url
+            .or_else(|| std::env::var("REDIS_URL").ok())
+            .or_else(|| std::env::var("KORA_REDIS_URL").ok())
+            .ok_or_else(|| {
+                log::error!(
+                    "Redis URL not found. Set [kora.cache].url, KORA_REDIS_URL, or REDIS_URL."
+                );
+                KoraError::ConfigError(
+                    "Redis URL not found. Set [kora.cache].url, KORA_REDIS_URL, or REDIS_URL"
+                        .to_string(),
+                )
+            })?;
+
+        Self::new_with_url(url)
+    }
+
+    pub fn new_with_url(url: String) -> Result<Self, KoraError> {
         let key_prefix =
             std::env::var("REDIS_PRICE_PREFIX").unwrap_or_else(|_| DEFAULT_KEY_PREFIX.to_string());
 
-        let client = redis::Client::open(url).map_err(|e| {
-            KoraError::ConfigError(format!("Failed to create Redis client: {e}"))
-        })?;
+        let client = redis::Client::open(url)
+            .map_err(|e| KoraError::ConfigError(format!("Failed to create Redis client: {e}")))?;
 
         Ok(Self { client, key_prefix })
     }
 
     async fn fetch_price_usd(&self, mint: &str) -> Result<f64, KoraError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await.map_err(|e| {
-            KoraError::RpcError(format!("Failed to connect to Redis: {e}"))
-        })?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| KoraError::RpcError(format!("Failed to connect to Redis: {e}")))?;
 
         let key = format!("{}:{}:latest", self.key_prefix, mint);
-        let price_str: Option<String> = conn.hget(&key, "price_usd").await.map_err(|e| {
-            KoraError::RpcError(format!("Failed to HGET Redis key {key}: {e}"))
-        })?;
+        let price_str: Option<String> = conn
+            .hget(&key, "price_usd")
+            .await
+            .map_err(|e| KoraError::RpcError(format!("Failed to HGET Redis key {key}: {e}")))?;
 
         let price_str = price_str.ok_or_else(|| {
             KoraError::RpcError(format!("No price data in Redis for mint {mint}"))
@@ -84,12 +100,13 @@ impl PriceOracle for RedisPriceOracle {
         }
 
         let sol_usd = self.fetch_price_usd(SOL_MINT).await.map_err(|_| {
-            KoraError::RpcError("No SOL price data in Redis — cannot convert to SOL-denominated prices".to_string())
+            KoraError::RpcError(
+                "No SOL price data in Redis — cannot convert to SOL-denominated prices".to_string(),
+            )
         })?;
 
-        let sol_usd_decimal = Decimal::from_f64_retain(sol_usd).ok_or_else(|| {
-            KoraError::RpcError("Invalid SOL price from Redis".to_string())
-        })?;
+        let sol_usd_decimal = Decimal::from_f64_retain(sol_usd)
+            .ok_or_else(|| KoraError::RpcError("Invalid SOL price from Redis".to_string()))?;
 
         let mut result = HashMap::new();
         for mint_address in mint_addresses {
@@ -141,7 +158,7 @@ mod tests {
         std::env::set_var("REDIS_URL", "redis://localhost:6379");
         std::env::remove_var("REDIS_PRICE_PREFIX");
         let oracle = RedisPriceOracle::new().unwrap();
-        assert_eq!(oracle.key_prefix, "price");
+        assert_eq!(oracle.key_prefix, "price:devnet");
         std::env::remove_var("REDIS_URL");
     }
 
