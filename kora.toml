@@ -72,7 +72,7 @@ allowed_programs = [
     "ComputeBudget111111111111111111111111111111",   # Compute Budget Program
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
     "DRaya7Kj3aMWQSy19kSjvmuwq9docCHofyP9kanQGaav",
-    "DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH"
+    "DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH",
     "DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb" # CPMM
     # "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", # Lighthouse Program (uncomment when lighthouse enabled)
 ]
