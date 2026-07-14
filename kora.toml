@@ -73,12 +73,13 @@ allowed_programs = [
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
     "DRaya7Kj3aMWQSy19kSjvmuwq9docCHofyP9kanQGaav",
     "DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH"
+    "DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb" # CPMM
     # "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", # Lighthouse Program (uncomment when lighthouse enabled)
 ]
 allowed_tokens = [
     "BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k", # USDC
     "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
-    "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT"
+    "USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT",
 ]
 allowed_spl_paid_tokens = [
     "BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k",
