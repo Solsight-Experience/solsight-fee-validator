@@ -50,7 +50,7 @@ get_payer_signer = true
 get_version = true
 
 [validation]
-max_allowed_lamports = 1000000
+max_allowed_lamports = 10000000
 max_signatures = 10
 price_source = "Redis"
 allow_durable_transactions = false
